@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#11182f">
+<title>Побег из подземелья 2</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b1022;font-family:Arial,sans-serif}
+body{display:flex;align-items:center;justify-content:center}
+#wrap{position:relative;width:min(100vw,1100px);height:min(100vh,620px);background:#11182f;overflow:hidden}
+canvas{width:100%;height:100%;display:block}
+#touch{display:none;position:absolute;left:0;right:0;bottom:10px;justify-content:space-between;padding:0 14px;pointer-events:none}
+.row{display:flex;gap:9px}.tb{width:58px;height:58px;border:1px solid #ffffff55;border-radius:16px;background:#10182ccc;color:#fff;display:grid;place-items:center;font-size:24px;touch-action:none;user-select:none}
+#loading{position:absolute;inset:0;display:grid;place-items:center;background:#0b1022;color:#fff;font-size:22px;z-index:5}
+@media(max-width:700px){#touch{display:flex}}
+</style>
+<script async src="/sdk.js" onload="initYSDK()"></script>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c" width="1100" height="620"></canvas>
+<div id="loading">Загрузка игры…</div>
+<div id="touch">
+ <div class="row"><div class="tb" data-key="ArrowLeft">◀</div><div class="tb" data-key="ArrowRight">▶</div></div>
+ <div class="row"><div class="tb" data-key="Space">⬆</div><div class="tb" data-key="Escape">Ⅱ</div></div>
+</div>
+</div>
+<script>
+"use strict";
+const c=document.getElementById("c"),ctx=c.getContext("2d"),W=1100,H=620;
+const keys={}; let jump=false, ysdk=null, sdkReady=false, audio=null;
+const SAVE="dungeon_escape_v2";
+let state="menu", level=0, score=0, lives=3, coins=0, best=0, cam=0, particles=[];
+let player, enemies, levelData;
+
+const levels=[
+ {name:"Забытый вход", start:{x:55,y:470}, goal:{x:1010,y:470},
+  plats:[[0,540,260,80],[350,540,260,80],[700,540,400,80],[80,445,150,22],[300,380,140,22],[500,445,120,22],[700,380,150,22],[890,300,130,22]],
+  coins:[[145,410],[350,345],[560,410],[770,345],[950,265]], enemies:[[420,500,34,40,360,575,1.5],[760,500,34,40,710,1040,1.7]]},
+ {name:"Кристальные пещеры", start:{x:45,y:470}, goal:{x:1000,y:170},
+  plats:[[0,540,190,80],[270,540,210,80],[560,540,160,80],[820,540,280,80],[50,430,120,22],[220,350,140,22],[420,430,130,22],[590,330,140,22],[760,240,150,22],[930,150,150,22]],
+  coins:[[105,395],[285,315],[475,395],[650,295],[835,205],[990,115]], enemies:[[300,500,34,40,275,450,1.7],[870,500,34,40,825,1060,2.0],[615,290,32,40,590,700,1.3]]},
+ {name:"Башня стража", start:{x:40,y:485}, goal:{x:980,y:85},
+  plats:[[0,555,220,65],[300,555,180,65],[560,555,160,65],[800,555,300,65],[120,455,130,22],[340,385,130,22],[570,315,130,22],[780,235,130,22],[930,155,140,22],[650,105,130,22]],
+  coins:[[180,420],[400,350],[630,280],[840,200],[995,120],[710,70]], enemies:[[350,515,34,40,305,450,2.0],[820,515,34,40,805,1060,2.2],[600,275,32,40,570,690,1.7]]}
+];
+
+function save(){
+ localStorage.setItem(SAVE,JSON.stringify({level,score,best}));
+ if(ysdk?.getPlayer){
+  ysdk.getPlayer().then(p=>p.setData({level,score,best},true)).catch(()=>{});
+ }
+}
+async function load(){
+ try{const x=JSON.parse(localStorage.getItem(SAVE)||"{}");level=+x.level||0;score=+x.score||0;best=+x.best||0}catch{}
+ if(ysdk?.getPlayer) try{const p=await ysdk.getPlayer();const x=await p.getData(["level","score","best"]);if(x){level=Math.max(level,+x.level||0);score=Math.max(score,+x.score||0);best=Math.max(best,+x.best||0)}}catch{}
+}
+async function initYSDK(){
+ try{if(window.YaGames){ysdk=await YaGames.init();sdkReady=true;ysdk.features?.LoadingAPI?.ready?.();await load();}}catch(e){}
+ document.getElementById("loading").remove();
+}
+setTimeout(()=>{if(document.getElementById("loading"))document.getElementById("loading").remove()},2500);
+
+function snd(type){
+ try{
+  audio ||= new (window.AudioContext||window.webkitAudioContext)();
+  const o=audio.createOscillator(),g=audio.createGain();
+  o.connect(g);g.connect(audio.destination);
+  const f={coin:880,jump:440,hit:120,win:660,click:220}[type]||300;
+  o.frequency.value=f;o.type=type==="hit"?"sawtooth":"square";
+  g.gain.setValueAtTime(.045,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+.09);
+  o.start();o.stop(audio.currentTime+.1);
+ }catch{}
+}
+function startLevel(n=level){
+ level=Math.max(0,Math.min(levels.length-1,n)); const d=levels[level]; levelData=d;
+ player={x:d.start.x,y:d.start.y,w:30,h:46,vx:0,vy:0,ground:false,inv:0};
+ enemies=d.enemies.map(e=>({x:e[0],y:e[1],w:e[2],h:e[3],min:e[4],max:e[5],v:e[6]}));
+ coins=0;cam=0;particles=[];state="play";
+ ysdk?.features?.GameplayAPI?.start?.();
+}
+function newGame(){level=0;score=0;best=0;lives=3;startLevel(0)}
+function loseLife(){lives--;snd("hit");player.inv=100;if(lives<=0){best=Math.max(best,score);save();state="over";ysdk?.features?.GameplayAPI?.stop?.()}else{const s=levelData.start;player.x=s.x;player.y=s.y;player.vx=player.vy=0}}
+function complete(){
+ score+=500; best=Math.max(best,score); save(); snd("win");
+ if(level<levels.length-1){state="leveldone";ysdk?.features?.GameplayAPI?.stop?.()}
+ else {state="win";ysdk?.features?.GameplayAPI?.stop?.()}
+}
+function overlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+
+addEventListener("keydown",e=>{
+ if(["ArrowLeft","ArrowRight","ArrowUp","Space"].includes(e.code))e.preventDefault();
+ if(!keys[e.code]&&["Space","ArrowUp","KeyW"].includes(e.code))jump=true;
+ keys[e.code]=true;
+ if(e.code==="Escape"&&state==="play"){state="pause";ysdk?.features?.GameplayAPI?.stop?.()}
+ else if(e.code==="Escape"&&state==="pause"){state="play";ysdk?.features?.GameplayAPI?.start?.()}
+});
+addEventListener("keyup",e=>keys[e.code]=false);
+
+addEventListener("keydown",e=>{
+  if(state==="menu" && (e.code==="Enter" || e.code==="Space")){
+    e.preventDefault();
+    snd("click");
+    newGame();
+  }
+  if((state==="over" || state==="win") && (e.code==="Enter" || e.code==="Space")){
+    e.preventDefault();
+    newGame();
+  }
+  if(state==="leveldone" && (e.code==="Enter" || e.code==="Space")){
+    e.preventDefault();
+    startLevel(level+1);
+  }
+  if(state==="pause" && (e.code==="Enter" || e.code==="Space")){
+    e.preventDefault();
+    state="play";
+    ysdk?.features?.GameplayAPI?.start?.();
+  }
+});
+document.querySelectorAll(".tb").forEach(b=>{
+ const k=b.dataset.key;
+ const dn=e=>{e.preventDefault();if(k==="Space"&&!keys[k])jump=true;keys[k]=true};
+ const up=e=>{e.preventDefault();keys[k]=false};
+ b.addEventListener("pointerdown",dn);b.addEventListener("pointerup",up);b.addEventListener("pointercancel",up);b.addEventListener("pointerleave",up);
+});
+
+c.addEventListener("pointerdown",e=>{
+ const r=c.getBoundingClientRect();
+ const x=(e.clientX-r.left)*W/r.width;
+ const y=(e.clientY-r.top)*H/r.height;
+
+ if(state==="menu"){
+   // Кнопка «Играть»: 290–352
+   if(x>W/2-170 && x<W/2+170 && y>275 && y<365){
+     snd("click");
+     newGame();
+     return;
+   }
+   // Кнопка «Как играть»: 370–425
+   if(x>W/2-170 && x<W/2+170 && y>360 && y<440){
+     snd("click");
+     state="help";
+     return;
+   }
+ }
+ else if(state==="help"){
+   // Любое нажатие по экрану возвращает в меню
+   state="menu";
+ }
+ else if(state==="over" || state==="win"){
+   newGame();
+ }
+ else if(state==="leveldone"){
+   startLevel(level+1);
+ }
+ else if(state==="pause"){
+   state="play";
+   ysdk?.features?.GameplayAPI?.start?.();
+ }
+});
+
+function update(dt){
+ if(state!=="play")return;
+ const left=keys.ArrowLeft||keys.KeyA,right=keys.ArrowRight||keys.KeyD;
+ if(left)player.vx-=.78*dt;if(right)player.vx+=.78*dt;if(!left&&!right)player.vx*=Math.pow(.8,dt);
+ player.vx=Math.max(-6,Math.min(6,player.vx));
+ if(jump&&player.ground){player.vy=-13.2;player.ground=false;snd("jump")} jump=false;
+ player.vy=Math.min(16,player.vy+.65*dt);
+
+ player.x+=player.vx*dt;
+ for(const p of levelData.plats){let b={x:p[0],y:p[1],w:p[2],h:p[3]};if(overlap(player,b)){if(player.vx>0)player.x=b.x-player.w;else if(player.vx<0)player.x=b.x+b.w;player.vx=0}}
+ const oldBottom=player.y+player.h;player.y+=player.vy*dt;player.ground=false;
+ for(const p of levelData.plats){let b={x:p[0],y:p[1],w:p[2],h:p[3]};if(overlap(player,b)){if(player.vy>=0&&oldBottom<=b.y+7){player.y=b.y-player.h;player.vy=0;player.ground=true}else if(player.vy<0){player.y=b.y+b.h;player.vy=0}}}
+
+ levelData.coins.forEach((q,i)=>{if(q[3])return;let b={x:q[0]-12,y:q[1]-12,w:24,h:24};if(overlap(player,b)){q[3]=1;coins++;score+=100;snd("coin");for(let k=0;k<8;k++)particles.push({x:q[0],y:q[1],vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,life:30})}});
+ for(const e of enemies){e.x+=e.v*dt;if(e.x<e.min||e.x+e.w>e.max)e.v*=-1;if(player.inv<=0&&overlap(player,e))loseLife()}
+ if(player.inv>0)player.inv-=dt;
+ if(player.y>H+100)loseLife();
+ const g={x:levelData.goal.x,y:levelData.goal.y,w:45,h:55};if(overlap(player,g))complete();
+ particles.forEach(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt});particles=particles.filter(p=>p.life>0);
+ cam+=(player.x-430-cam)*.09*dt;cam=Math.max(0,Math.min(280,cam));
+}
+
+function bg(){
+ const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,"#101735");g.addColorStop(1,"#2a1b3d");ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ ctx.fillStyle="#fff4b8";ctx.beginPath();ctx.arc(880-cam*.12,85,38,0,7);ctx.fill();
+ ctx.fillStyle="#151c39";ctx.beginPath();ctx.arc(898-cam*.12,72,38,0,7);ctx.fill();
+ for(let i=0;i<28;i++){ctx.fillStyle="#9da9d855";ctx.fillRect((i*197-cam*.15)%1100,35+(i*43)%190,2,2)}
+ for(let i=0;i<11;i++){let x=i*140-(cam*.25%140);ctx.fillStyle=i%2?"#182143":"#202a4c";ctx.beginPath();ctx.moveTo(x,540);ctx.lineTo(x+65,350);ctx.lineTo(x+140,540);ctx.fill()}
+}
+function platform(p){ctx.fillStyle="#44385e";ctx.fillRect(p[0]-cam,p[1],p[2],p[3]);ctx.fillStyle="#77649b";ctx.fillRect(p[0]-cam,p[1],p[2],7);ctx.fillStyle="#302742";for(let x=p[0]+10;x<p[0]+p[2];x+=34)ctx.fillRect(x-cam,p[1]+16,18,5)}
+function drawCoin(q,i){if(q[3])return;let x=q[0]-cam,y=q[1]+Math.sin(Date.now()/180+i)*4;ctx.fillStyle="#ffd34d";ctx.beginPath();ctx.arc(x,y,11,0,7);ctx.fill();ctx.fillStyle="#fff2a4";ctx.fillRect(x-3,y-7,4,14)}
+function drawPlayer(){if(player.inv>0&&Math.floor(player.inv/6)%2===0)return;let x=player.x-cam,y=player.y;ctx.fillStyle="#4ca6ff";ctx.fillRect(x+5,y+15,20,27);ctx.fillStyle="#ffd0a6";ctx.fillRect(x+4,y+2,22,18);ctx.fillStyle="#5a3526";ctx.fillRect(x+4,y+1,22,7);ctx.fillStyle="#17203b";ctx.fillRect(x+19,y+8,3,3);ctx.fillStyle="#263d78";ctx.fillRect(x+5,y+40,8,6);ctx.fillRect(x+18,y+40,8,6)}
+function enemy(e){let x=e.x-cam,y=e.y;ctx.fillStyle="#e9545d";ctx.fillRect(x,y+8,e.w,e.h-8);ctx.fillStyle="#8d2b3d";ctx.fillRect(x+5,y,e.w-10,12);ctx.fillStyle="#fff";ctx.fillRect(x+7,y+12,7,7);ctx.fillRect(x+21,y+12,7,7);ctx.fillStyle="#222";ctx.fillRect(x+10,y+14,4,4);ctx.fillRect(x+24,y+14,4,4)}
+function goal(){let x=levelData.goal.x-cam,y=levelData.goal.y;ctx.fillStyle="#dce1ee";ctx.fillRect(x,y,6,55);ctx.fillStyle="#50e58c";ctx.beginPath();ctx.moveTo(x+6,y);ctx.lineTo(x+45,y+13);ctx.lineTo(x+6,y+27);ctx.fill()}
+function hud(){ctx.fillStyle="#080d21dd";ctx.fillRect(0,0,W,54);ctx.fillStyle="#fff";ctx.font="bold 19px Arial";ctx.fillText("🏰 ПОБЕГ ИЗ ПОДЗЕМЕЛЬЯ",18,34);ctx.font="bold 17px Arial";ctx.fillText("Ур. "+(level+1)+"/"+levels.length,370,34);ctx.fillText("🪙 "+score,480,34);ctx.fillText("❤️ ".repeat(Math.max(0,lives)),610,34);ctx.fillStyle="#b9c6e8";ctx.font="13px Arial";ctx.fillText(levelData.name,870,33)}
+function panel(title,sub,button){
+ ctx.fillStyle="#070b1dcc";ctx.fillRect(0,0,W,H);ctx.textAlign="center";ctx.fillStyle="#fff";ctx.font="bold 50px Arial";ctx.fillText(title,W/2,220);ctx.fillStyle="#cbd6f4";ctx.font="21px Arial";ctx.fillText(sub,W/2,265);
+ if(button){ctx.fillStyle="#4da3ff";ctx.fillRect(W/2-145,320,290,62);ctx.fillStyle="#fff";ctx.font="bold 20px Arial";ctx.fillText(button,W/2,360)}
+ ctx.textAlign="left";
+}
+function menu(){
+ bg();ctx.textAlign="center";ctx.fillStyle="#fff";ctx.font="bold 52px Arial";ctx.fillText("ПОБЕГ ИЗ ПОДЗЕМЕЛЬЯ",W/2,190);
+ ctx.fillStyle="#aebce2";ctx.font="22px Arial";ctx.fillText("2D платформер · версия 2.0",W/2,230);
+ ctx.fillStyle="#4da3ff";ctx.fillRect(W/2-150,290,300,62);ctx.fillStyle="#fff";ctx.font="bold 22px Arial";ctx.fillText("▶  ИГРАТЬ",W/2,331);
+ ctx.fillStyle="#263455";ctx.fillRect(W/2-150,370,300,55);ctx.fillStyle="#dce5ff";ctx.font="18px Arial";ctx.fillText("❓ Как играть",W/2,405);
+ ctx.fillStyle="#8896bd";ctx.font="15px Arial";ctx.fillText("Лучший счёт: "+best,W/2,475);ctx.fillText("A/D или ←/→ · Space/W/↑ · Esc — пауза",W/2,505);ctx.textAlign="left";
+}
+function help(){bg();panel("КАК ИГРАТЬ","Собирай монеты, избегай врагов и доберись до зелёного флага.","Вернуться в меню");ctx.textAlign="center";ctx.fillStyle="#dce5ff";ctx.font="18px Arial";ctx.fillText("Монета = +100 · Финиш = +500 · Всего 3 уровня",W/2,420);ctx.textAlign="left"}
+function draw(){
+ if(state==="menu"){menu();return}if(state==="help"){help();return}
+ bg();levelData.plats.forEach(platform);levelData.coins.forEach(drawCoin);goal();enemies.forEach(enemy);drawPlayer();particles.forEach(p=>{ctx.fillStyle="#ffd34d";ctx.fillRect(p.x-cam,p.y,4,4)});hud();
+ if(state==="pause")panel("ПАУЗА","Игра остановлена","Продолжить");
+ if(state==="leveldone")panel("УРОВЕНЬ ПРОЙДЕН!","Счёт: "+score,"Следующий уровень");
+ if(state==="over")panel("ИГРА ОКОНЧЕНА","Счёт: "+score,"Начать заново");
+ if(state==="win")panel("ПОБЕДА! 🎉","Все уровни пройдены · Счёт: "+score,"Играть заново");
+}
+function clickPanel(){
+ if(state==="menu"||state==="help"||state==="play")return;
+ if(state==="pause"){state="play";ysdk?.features?.GameplayAPI?.start?.()}
+ else if(state==="leveldone")startLevel(level+1);
+ else if(state==="over"||state==="win")newGame();
+}
+// Кнопки экранов обрабатываются через pointerdown выше.
+
+let last=performance.now();function loop(t){let dt=Math.min(2,(t-last)/16.67);last=t;update(dt);draw();requestAnimationFrame(loop)}requestAnimationFrame(loop);
+</script>
+</body>
+</html>
